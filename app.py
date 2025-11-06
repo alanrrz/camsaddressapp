@@ -16,8 +16,7 @@ SCHOOLS_CSV_URL = (
     "ab73deb13c0a02107f43001161ab70891630a9c7/schools.csv"
 )
 
-# Your CSV headers:
-# LABEL,LAT,LON,SHORTNAME
+# CSV headers: LABEL,LAT,LON,SHORTNAME
 SCHOOL_NAME_COL = "LABEL"
 LAT_COL = "LAT"
 LON_COL = "LON"
@@ -37,7 +36,6 @@ def load_schools() -> pd.DataFrame:
     Assumes columns: LABEL, LAT, LON, SHORTNAME.
     """
     df = pd.read_csv(SCHOOLS_CSV_URL)
-    # Drop rows missing coordinates
     df = df.dropna(subset=[LAT_COL, LON_COL])
     return df
 
@@ -128,17 +126,19 @@ def main():
         st.error("Schools CSV loaded but is empty or missing coordinates.")
         return
 
-    # Build dropdown list from LABEL
+    # Dropdown list from LABEL
     school_names = (
         schools_df[SCHOOL_NAME_COL].dropna().astype(str).sort_values().unique()
     )
 
     st.sidebar.header("School selection")
     selected_school = st.sidebar.selectbox(
-        "Select a school", school_names, index=0 if len(school_names) > 0 else None
+        "Select a school",
+        school_names,
+        index=0 if len(school_names) > 0 else None,
     )
 
-    # Get selected school's row
+    # Selected school's row
     school_row = schools_df[schools_df[SCHOOL_NAME_COL] == selected_school].iloc[0]
     school_lat = float(school_row[LAT_COL])
     school_lon = float(school_row[LON_COL])
@@ -154,7 +154,6 @@ def main():
     # -------------------------------------------------------------------
     m = folium.Map(location=[school_lat, school_lon], zoom_start=16)
 
-    # Marker for the school
     popup_text = selected_school
     if school_short:
         popup_text += f" ({school_short})"
@@ -196,8 +195,12 @@ def main():
     col1, col2 = st.columns([1, 2])
 
     with col1:
-    last = map_data.get("last_active_drawing")
-    run_query = st.button("Run CAMS query on drawn area")
+        last = map_data.get("last_active_drawing")
+        if last:
+            st.success("Polygon detected. Ready to query CAMS.")
+        else:
+            st.info("Draw a polygon or rectangle to enable the query.")
+        run_query = st.button("Run CAMS query on drawn area")
 
     df = pd.DataFrame()
 
