@@ -196,11 +196,8 @@ def main():
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        st.markdown("### Drawn geometry")
-        last = map_data.get("last_active_drawing")
-        st.json(last)
-
-        run_query = st.button("Run CAMS query on drawn area")
+    last = map_data.get("last_active_drawing")
+    run_query = st.button("Run CAMS query on drawn area")
 
     df = pd.DataFrame()
 
