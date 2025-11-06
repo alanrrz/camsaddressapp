@@ -7,11 +7,39 @@ import folium
 from folium.plugins import Draw
 from streamlit_folium import st_folium
 
+# -------------------------------------------------------------------
+# CONFIGURATION: YOUR GITHUB CSV + COLUMN NAMES
+# -------------------------------------------------------------------
+
+SCHOOLS_CSV_URL = (
+    "https://raw.githubusercontent.com/alanrrz/la_buffer_app_clean/"
+    "ab73deb13c0a02107f43001161ab70891630a9c7/schools.csv"
+)
+
+# Your CSV headers:
+# LABEL,LAT,LON,SHORTNAME
+SCHOOL_NAME_COL = "LABEL"
+LAT_COL = "LAT"
+LON_COL = "LON"
+SHORTNAME_COL = "SHORTNAME"
+
 # LA County CAMS Address Points feature service
 CAMS_URL = (
     "https://arcgis.gis.lacounty.gov/arcgis/rest/services/DRP/"
     "GISNET_Public/MapServer/402/query"
 )
+
+
+@st.cache_data
+def load_schools() -> pd.DataFrame:
+    """
+    Load schools from GitHub CSV.
+    Assumes columns: LABEL, LAT, LON, SHORTNAME.
+    """
+    df = pd.read_csv(SCHOOLS_CSV_URL)
+    # Drop rows missing coordinates
+    df = df.dropna(subset=[LAT_COL, LON_COL])
+    return df
 
 
 def build_esri_polygon_from_geojson(geojson_geom: dict) -> dict:
@@ -20,8 +48,9 @@ def build_esri_polygon_from_geojson(geojson_geom: dict) -> dict:
     Expects geometry like:
       {"type": "Polygon", "coordinates": [[[lon, lat], [lon, lat], ...]]}
     """
-    if geojson_geom.get("type") != "Polygon":
-        raise ValueError("Expected a Polygon geometry")
+    geom_type = geojson_geom.get("type")
+    if geom_type != "Polygon":
+        raise ValueError(f"Expected a Polygon geometry, got {geom_type}")
 
     coords = geojson_geom["coordinates"][0]  # first ring
     esri_polygon = {
@@ -74,19 +103,69 @@ def query_cams_addresses(esri_polygon: dict) -> pd.DataFrame:
 def main():
     st.set_page_config(page_title="CAMS Address Selector", layout="wide")
     st.title("CAMS Address Selector (LA County)")
+
     st.markdown(
         """
-        This app lets you:
-        1. Draw an area in Los Angeles County.
-        2. Query the LA County CAMS service.
-        3. Download all address points inside the drawn area as CSV.
+        Workflow:
+        1. Pick a school from the dropdown (left sidebar).
+        2. The map will zoom to that school and drop a marker.
+        3. Draw a polygon or rectangle around the area you care about.
+        4. Click **Run CAMS query** to pull all LA County CAMS address points inside.
+        5. Download the results as CSV.
         """
     )
 
-    # Create base map centered on LA
-    m = folium.Map(location=[34.0522, -118.2437], zoom_start=10)
+    # -------------------------------------------------------------------
+    # LOAD SCHOOLS FROM GITHUB
+    # -------------------------------------------------------------------
+    try:
+        schools_df = load_schools()
+    except Exception as e:
+        st.error(f"Error loading schools CSV from GitHub: {e}")
+        return
 
-    # Add drawing controls (polygon + rectangle)
+    if schools_df.empty:
+        st.error("Schools CSV loaded but is empty or missing coordinates.")
+        return
+
+    # Build dropdown list from LABEL
+    school_names = (
+        schools_df[SCHOOL_NAME_COL].dropna().astype(str).sort_values().unique()
+    )
+
+    st.sidebar.header("School selection")
+    selected_school = st.sidebar.selectbox(
+        "Select a school", school_names, index=0 if len(school_names) > 0 else None
+    )
+
+    # Get selected school's row
+    school_row = schools_df[schools_df[SCHOOL_NAME_COL] == selected_school].iloc[0]
+    school_lat = float(school_row[LAT_COL])
+    school_lon = float(school_row[LON_COL])
+    school_short = str(school_row.get(SHORTNAME_COL, ""))
+
+    st.sidebar.write(f"**Full name (LABEL):** {selected_school}")
+    if school_short:
+        st.sidebar.write(f"**Short name:** {school_short}")
+    st.sidebar.write(f"**Lat/Lon:** {school_lat:.6f}, {school_lon:.6f}")
+
+    # -------------------------------------------------------------------
+    # CREATE MAP CENTERED ON SELECTED SCHOOL
+    # -------------------------------------------------------------------
+    m = folium.Map(location=[school_lat, school_lon], zoom_start=16)
+
+    # Marker for the school
+    popup_text = selected_school
+    if school_short:
+        popup_text += f" ({school_short})"
+
+    folium.Marker(
+        [school_lat, school_lon],
+        popup=popup_text,
+        tooltip=popup_text,
+    ).add_to(m)
+
+    # Drawing controls (polygon + rectangle)
     draw = Draw(
         export=False,
         position="topleft",
@@ -102,7 +181,11 @@ def main():
     )
     draw.add_to(m)
 
-    st.markdown("### Map (draw a polygon or rectangle)")
+    st.markdown("### Map")
+    st.write(
+        "Choose a school in the sidebar, then draw a polygon or rectangle around it."
+    )
+
     map_data = st_folium(
         m,
         width=900,
@@ -117,7 +200,7 @@ def main():
         last = map_data.get("last_active_drawing")
         st.json(last)
 
-        run_query = st.button("Run query on drawn area")
+        run_query = st.button("Run CAMS query on drawn area")
 
     df = pd.DataFrame()
 
@@ -137,7 +220,7 @@ def main():
     with col2:
         st.markdown("### Results")
         if not df.empty:
-            st.write(f"Found **{len(df)}** address points inside the drawn area.")
+            st.write(f"Found **{len(df)}** CAMS address points inside the drawn area.")
             st.dataframe(df)
 
             csv_bytes = df.to_csv(index=False).encode("utf-8")
@@ -148,7 +231,7 @@ def main():
                 mime="text/csv",
             )
         else:
-            st.write("No results yet. Draw an area and click **Run query**.")
+            st.write("No results yet. Draw an area and click **Run CAMS query**.")
 
 
 if __name__ == "__main__":
