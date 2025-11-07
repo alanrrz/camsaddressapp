@@ -127,6 +127,17 @@ def detect_apartment_note(row) -> str:
     return ""
 
 
+def detect_apartment_note(row) -> str:
+    """
+    Mark addresses as likely condos/apartments if the building type
+    field contains a dash (e.g., '1-4', '5-9', etc.).
+    """
+    btype = str(row.get("BldgTypePl", "") or row.get("BldgType", "")).strip()
+    if "-" in btype:
+        return "CONDO/APARTMENT"
+    return ""
+
+
 def prepare_address_output(df: pd.DataFrame) -> pd.DataFrame:
     """
     Reduce CAMS output to the requested columns and add apartment/condo note.
@@ -143,8 +154,6 @@ def prepare_address_output(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     df = df.copy()
-
-    # Add note column
     df["address_note"] = df.apply(detect_apartment_note, axis=1)
 
     desired_cols = [
@@ -156,7 +165,7 @@ def prepare_address_output(df: pd.DataFrame) -> pd.DataFrame:
         "address_note",
     ]
 
-    # Keep only the columns that actually exist in the DataFrame
+    # Only include columns that exist in the dataset
     existing_cols = [c for c in desired_cols if c in df.columns]
     return df[existing_cols]
 
