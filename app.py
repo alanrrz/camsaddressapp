@@ -151,10 +151,11 @@ def build_mailing_address_from_cams(row):
 
     return street, city, state, zip5
 
+
 def usps_verify_one(street: str, city: str, state: str, zip5: str) -> dict:
     """
     Call USPS Verify API for a single address.
-    Returns standardized fields, or {} on error.
+    Returns standardized fields, or an error description if USPS rejects it.
     """
     xml = f"""
     <AddressValidateRequest USERID="{USPS_USER_ID}">
@@ -175,28 +176,30 @@ def usps_verify_one(street: str, city: str, state: str, zip5: str) -> dict:
     try:
         resp = requests.get(USPS_ENDPOINT, params=params, timeout=10)
         resp.raise_for_status()
-    except requests.RequestException:
-        return {}
+    except requests.RequestException as e:
+        return {"usps_error": f"HTTP error: {e}"}
 
     try:
         root = ET.fromstring(resp.text)
     except ET.ParseError:
-        return {}
+        return {"usps_error": "XML parse error"}
 
-    # USPS returns <Error> when it cannot validate
+    # If USPS returns an <Error>, capture the message
     err = root.find(".//Error")
     if err is not None:
-        return {}
+        number = (err.findtext("Number") or "").strip()
+        desc = (err.findtext("Description") or "").strip()
+        return {"usps_error": f"{number}: {desc}"}
 
     addr = root.find(".//Address")
     if addr is None:
-        return {}
+        return {"usps_error": "No <Address> element in USPS response"}
 
     def gettext(tag: str) -> str:
         el = addr.find(tag)
         return el.text.strip() if el is not None and el.text is not None else ""
 
-    dpv_conf = gettext("DPVConfirmation")  # deliverability flag if your account has DPV
+    dpv_conf = gettext("DPVConfirmation")
     dpv_cmra = gettext("DPVCMRA")
     dpv_vac = gettext("DPVVacant")
 
@@ -209,15 +212,31 @@ def usps_verify_one(street: str, city: str, state: str, zip5: str) -> dict:
         "usps_dpv_confirmation": dpv_conf,
         "usps_dpv_cmra": dpv_cmra,
         "usps_dpv_vacant": dpv_vac,
+        "usps_error": "",
     }
+
+
+def detect_apartment_note(row) -> str:
+    """
+    If BldgTypePl or BldgType contains '1-4',
+    treat it as an apartment/small multi-family and flag it.
+    """
+    btype = str(row.get("BldgTypePl", "") or row.get("BldgType", "")).strip()
+    if "1-4" in btype:
+        return "APARTMENT numbers"
+    return ""
 
 
 def usps_clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
-    For each CAMS result, call USPS Verify and append standardized columns.
+    Call USPS for each CAMS row and append:
+      - street_sent_to_usps, city_sent_to_usps, etc.
+      - usps_* standardized fields (if any)
+      - usps_error (if USPS rejected or access failed)
+      - usps_status: 'VERIFIED' or 'UNVERIFIED'
+      - address_note: 'APARTMENT numbers' when applicable
 
-    Only rows where USPS returns a non-empty usps_street are kept in
-    the final DataFrame. Everything else is dropped as 'not verified'.
+    All rows are returned.
     """
     if df.empty:
         return df
@@ -228,11 +247,32 @@ def usps_clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     for i, (_, row) in enumerate(df.iterrows(), start=1):
         street, city, state, zip5 = build_mailing_address_from_cams(row)
-        cleaned = {}
+
         if street and city and state:
             cleaned = usps_verify_one(street, city, state, zip5)
+        else:
+            cleaned = {"usps_error": "Missing street/city/state"}
+
+        if cleaned.get("usps_error"):
+            status = "UNVERIFIED"
+        elif cleaned.get("usps_street"):
+            status = "VERIFIED"
+        else:
+            status = "UNVERIFIED"
+
+        note = detect_apartment_note(row)
 
         merged = row.to_dict()
+        merged.update(
+            {
+                "street_sent_to_usps": street,
+                "city_sent_to_usps": city,
+                "state_sent_to_usps": state,
+                "zip_sent_to_usps": zip5,
+                "usps_status": status,
+                "address_note": note,
+            }
+        )
         merged.update(cleaned)
         results.append(merged)
 
@@ -241,13 +281,20 @@ def usps_clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     progress.empty()
     df_all = pd.DataFrame(results)
 
-    # Keep only verified rows: USPS returned a standardized street
-    if "usps_street" in df_all.columns:
-        df_verified = df_all[df_all["usps_street"].notna() & (df_all["usps_street"] != "")]
-    else:
-        df_verified = pd.DataFrame()
+    # Optional: show a quick summary of USPS errors in the UI
+    if "usps_error" in df_all.columns:
+        errors = (
+            df_all["usps_error"]
+            .fillna("")
+            .loc[df_all["usps_error"] != ""]
+            .value_counts()
+            .head(5)
+        )
+        if not errors.empty:
+            st.warning("Sample USPS errors (top 5):")
+            st.write(errors)
 
-    return df_verified
+    return df_all
 
 
 # -------------------------------------------------------------------
@@ -271,8 +318,9 @@ def main():
 
         - Query LA County CAMS for all address points inside your shape.  
         - Run USPS address cleaning on each result.  
-        - KEEP ONLY addresses that USPS returns as standardized.  
-        - Show you the table and a USPS-ready CSV.
+        - Mark each row as VERIFIED or UNVERIFIED.  
+        - Flag likely apartment buildings as "APARTMENT numbers".  
+        - Show you the table and a CSV for download.
         """
     )
 
@@ -379,14 +427,8 @@ def main():
                     st.warning("No CAMS address points found in that area.")
                     df_final = df_cams
                 else:
-                    with st.spinner("Cleaning addresses with USPS and keeping only verified ones..."):
+                    with st.spinner("Cleaning addresses with USPS..."):
                         df_final = usps_clean_dataframe(df_cams)
-
-                    if df_final.empty:
-                        st.warning(
-                            "CAMS returned addresses, but USPS did not validate any of them. "
-                            "You may need to inspect a few rows and check the field mapping."
-                        )
 
             except Exception as e:
                 st.error(f"Error while processing: {e}")
@@ -395,16 +437,16 @@ def main():
         st.markdown("### Results")
         if not df_final.empty:
             st.write(
-                f"USPS-verified addresses: **{len(df_final)}** rows "
-                "(original CAMS data + usps_* columns)."
+                f"Addresses returned: **{len(df_final)}** rows "
+                "(CAMS data + USPS fields + status/note)."
             )
             st.dataframe(df_final)
 
             csv_bytes = df_final.to_csv(index=False).encode("utf-8")
             st.download_button(
-                "Download USPS-verified CSV",
+                "Download address CSV",
                 data=csv_bytes,
-                file_name="cams_usps_verified_addresses.csv",
+                file_name="cams_usps_addresses.csv",
                 mime="text/csv",
             )
         else:
