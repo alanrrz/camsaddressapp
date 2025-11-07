@@ -129,9 +129,8 @@ def detect_apartment_note(row) -> str:
 
 def build_mailing_address(row) -> str:
     """
-    Build a simple mailing address from:
+    Build a clean mailing address from:
       Number, StreetName, PostType, LegalComm, ZipCode
-
     Example:
       816 108Th St Los Angeles 90059
     """
@@ -143,37 +142,28 @@ def build_mailing_address(row) -> str:
     zip5 = zip_raw[:5] if zip_raw else ""
 
     parts = [number, street, post_type, city, zip5]
-    mailing = " ".join(p for p in parts if p)
-    return mailing
+    return " ".join(p for p in parts if p)
 
 
 def prepare_address_output(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Reduce CAMS output to the requested columns and add:
-      - MailingAddress (Number + StreetName + PostType + LegalComm + ZipCode)
-      - address_note (multi-unit flag)
-
-    Columns returned:
-      - MailingAddress
-      - NumPrefix
-      - Number
-      - StreetName
-      - PostType
-      - LegalComm
-      - ZipCode
-      - address_note
+    Prepare final dataset for export:
+      - Creates MailingAddress from basic fields
+      - Flags multi-unit properties
+      - Keeps selected columns:
+        MailingAddress, FullAddress_EnerGov, NumPrefix, Number,
+        StreetName, PostType, LegalComm, ZipCode, address_note
     """
     if df.empty:
         return df
 
     df = df.copy()
-
-    # Build mailing address and multi-unit note
     df["MailingAddress"] = df.apply(build_mailing_address, axis=1)
     df["address_note"] = df.apply(detect_apartment_note, axis=1)
 
     desired_cols = [
         "MailingAddress",
+        "FullAddress_EnerGov",
         "NumPrefix",
         "Number",
         "StreetName",
@@ -183,7 +173,6 @@ def prepare_address_output(df: pd.DataFrame) -> pd.DataFrame:
         "address_note",
     ]
 
-    # Keep only columns that actually exist
     existing_cols = [c for c in desired_cols if c in df.columns]
     return df[existing_cols]
 
