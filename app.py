@@ -117,28 +117,39 @@ def query_cams_addresses(esri_polygon: dict) -> pd.DataFrame:
 
 def build_mailing_address_from_cams(row):
     """
-    Build mailing address components from a CAMS row.
-
-    This uses the actual CAMS fields visible in your screenshot:
+    Build mailing address components from a CAMS row using the actual fields:
       Number, PreDirAbbr, StreetName, PostTypeAbbr, UnitName,
-      PostComm (city), ZipCode.
+      PostComm1 (city), ZipCode.
     """
+
+    # House number
     house = str(row.get("Number", "")).strip()
-    predir = str(row.get("PreDirAbbr", "") or row.get("PreDir", "")).strip()
+
+    # Directional prefix (E, W, N, S)
+    predir = str(row.get("PreDirAbbr", "")).strip()
+
+    # Street name and type
     name = str(row.get("StreetName", "")).strip()
-    st_type = str(row.get("PostTypeAbbr", "") or row.get("PostType", "")).strip()
+    st_type = str(row.get("PostTypeAbbr", "")).strip()
+
+    # Optional unit (apt, suite, etc.)
     unit = str(row.get("UnitName", "")).strip()
 
+    # Assemble street line: "816 E 108Th St" or with unit if present
     street_parts = [house, predir, name, st_type, unit]
     street = " ".join(p for p in street_parts if p)
 
-    city = str(row.get("PostComm", "") or row.get("LegalComm", "")).strip()
-    state = "CA"  # CAMS is LA County, so California
+    # City: prefer PostComm1, fall back to LegalComm
+    city = str(row.get("PostComm1", "") or row.get("LegalComm", "")).strip()
+
+    # State: all CAMS records are in LA County -> California
+    state = "CA"
+
+    # ZIP5 from ZipCode
     zip_raw = str(row.get("ZipCode", "")).strip()
     zip5 = zip_raw[:5] if zip_raw else ""
 
     return street, city, state, zip5
-
 
 def usps_verify_one(street: str, city: str, state: str, zip5: str) -> dict:
     """
