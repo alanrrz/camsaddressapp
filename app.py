@@ -2,7 +2,6 @@ import json
 import requests
 import pandas as pd
 import streamlit as st
-import xml.etree.ElementTree as ET
 
 import folium
 from folium.plugins import Draw
@@ -28,13 +27,6 @@ CAMS_URL = (
     "https://arcgis.gis.lacounty.gov/arcgis/rest/services/DRP/"
     "GISNET_Public/MapServer/402/query"
 )
-
-# USPS Web Tools
-# IMPORTANT: set USPS_USER_ID in Streamlit Secrets for this app:
-# Settings -> Secrets:
-# USPS_USER_ID = "YOUR_WEBTOOLS_USERID"
-USPS_USER_ID = st.secrets["USPS_USER_ID"]
-USPS_ENDPOINT = "https://secure.shippingapis.com/ShippingAPI.dll"
 
 
 # -------------------------------------------------------------------
@@ -112,189 +104,61 @@ def query_cams_addresses(esri_polygon: dict) -> pd.DataFrame:
 
 
 # -------------------------------------------------------------------
-# USPS ADDRESS CLEANING HELPERS
+# ADDRESS POST-PROCESSING (NO USPS)
 # -------------------------------------------------------------------
-
-def build_mailing_address_from_cams(row):
-    """
-    Build mailing address components from a CAMS row using the actual fields:
-      Number, PreDirAbbr, StreetName, PostTypeAbbr, UnitName,
-      PostComm1 (city), ZipCode.
-    """
-
-    # House number
-    house = str(row.get("Number", "")).strip()
-
-    # Directional prefix (E, W, N, S)
-    predir = str(row.get("PreDirAbbr", "")).strip()
-
-    # Street name and type
-    name = str(row.get("StreetName", "")).strip()
-    st_type = str(row.get("PostTypeAbbr", "")).strip()
-
-    # Optional unit (apt, suite, etc.)
-    unit = str(row.get("UnitName", "")).strip()
-
-    # Assemble street line: "816 E 108Th St" or with unit if present
-    street_parts = [house, predir, name, st_type, unit]
-    street = " ".join(p for p in street_parts if p)
-
-    # City: prefer PostComm1, fall back to LegalComm
-    city = str(row.get("PostComm1", "") or row.get("LegalComm", "")).strip()
-
-    # State: all CAMS records are in LA County -> California
-    state = "CA"
-
-    # ZIP5 from ZipCode
-    zip_raw = str(row.get("ZipCode", "")).strip()
-    zip5 = zip_raw[:5] if zip_raw else ""
-
-    return street, city, state, zip5
-
-
-def usps_verify_one(street: str, city: str, state: str, zip5: str) -> dict:
-    """
-    Call USPS Verify API for a single address.
-    Returns standardized fields, or an error description if USPS rejects it.
-    """
-    xml = f"""
-    <AddressValidateRequest USERID="{USPS_USER_ID}">
-      <Revision>1</Revision>
-      <Address ID="0">
-        <Address1></Address1>
-        <Address2>{street}</Address2>
-        <City>{city}</City>
-        <State>{state}</State>
-        <Zip5>{zip5}</Zip5>
-        <Zip4></Zip4>
-      </Address>
-    </AddressValidateRequest>
-    """.strip()
-
-    params = {"API": "Verify", "XML": xml}
-
-    try:
-        resp = requests.get(USPS_ENDPOINT, params=params, timeout=10)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        return {"usps_error": f"HTTP error: {e}"}
-
-    try:
-        root = ET.fromstring(resp.text)
-    except ET.ParseError:
-        return {"usps_error": "XML parse error"}
-
-    # If USPS returns an <Error>, capture the message
-    err = root.find(".//Error")
-    if err is not None:
-        number = (err.findtext("Number") or "").strip()
-        desc = (err.findtext("Description") or "").strip()
-        return {"usps_error": f"{number}: {desc}"}
-
-    addr = root.find(".//Address")
-    if addr is None:
-        return {"usps_error": "No <Address> element in USPS response"}
-
-    def gettext(tag: str) -> str:
-        el = addr.find(tag)
-        return el.text.strip() if el is not None and el.text is not None else ""
-
-    dpv_conf = gettext("DPVConfirmation")
-    dpv_cmra = gettext("DPVCMRA")
-    dpv_vac = gettext("DPVVacant")
-
-    return {
-        "usps_street": gettext("Address2"),
-        "usps_city": gettext("City"),
-        "usps_state": gettext("State"),
-        "usps_zip5": gettext("Zip5"),
-        "usps_zip4": gettext("Zip4"),
-        "usps_dpv_confirmation": dpv_conf,
-        "usps_dpv_cmra": dpv_cmra,
-        "usps_dpv_vacant": dpv_vac,
-        "usps_error": "",
-    }
-
 
 def detect_apartment_note(row) -> str:
     """
-    If BldgTypePl or BldgType contains '1-4',
-    treat it as an apartment/small multi-family and flag it.
+    Mark likely apartment / condo addresses.
+
+    Heuristics:
+      - If BldgTypePl or BldgType contains '1-4'
+      - Or if UnitName is not empty
+
+    Adjust this logic if CAMS uses different codes for multi-family.
     """
-    btype = str(row.get("BldgTypePl", "") or row.get("BldgType", "")).strip()
-    if "1-4" in btype:
-        return "APARTMENT numbers"
+    btype = str(row.get("BldgTypePl", "") or row.get("BldgType", "")).upper()
+    unit = str(row.get("UnitName", "")).strip()
+
+    if "1-4" in btype or "APT" in btype or "APART" in btype or "CONDO" in btype:
+        return "APARTMENT / CONDO (check unit numbers)"
+    if unit:
+        return "UNIT PRESENT (check apartment/condo number)"
     return ""
 
 
-def usps_clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def prepare_address_output(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Call USPS for each CAMS row and append:
-      - street_sent_to_usps, city_sent_to_usps, etc.
-      - usps_* standardized fields (if any)
-      - usps_error (if USPS rejected or access failed)
-      - usps_status: 'VERIFIED' or 'UNVERIFIED'
-      - address_note: 'APARTMENT numbers' when applicable
+    Reduce CAMS output to the requested columns and add apartment/condo note.
 
-    All rows are returned.
+    Columns returned:
+      - FullAddress
+      - NumPrefix
+      - Number
+      - StreetName
+      - PostType
+      - address_note
     """
     if df.empty:
         return df
 
-    results = []
-    total = len(df)
-    progress = st.progress(0)
+    df = df.copy()
 
-    for i, (_, row) in enumerate(df.iterrows(), start=1):
-        street, city, state, zip5 = build_mailing_address_from_cams(row)
+    # Add note column
+    df["address_note"] = df.apply(detect_apartment_note, axis=1)
 
-        if street and city and state:
-            cleaned = usps_verify_one(street, city, state, zip5)
-        else:
-            cleaned = {"usps_error": "Missing street/city/state"}
+    desired_cols = [
+        "FullAddress",
+        "NumPrefix",
+        "Number",
+        "StreetName",
+        "PostType",
+        "address_note",
+    ]
 
-        if cleaned.get("usps_error"):
-            status = "UNVERIFIED"
-        elif cleaned.get("usps_street"):
-            status = "VERIFIED"
-        else:
-            status = "UNVERIFIED"
-
-        note = detect_apartment_note(row)
-
-        merged = row.to_dict()
-        merged.update(
-            {
-                "street_sent_to_usps": street,
-                "city_sent_to_usps": city,
-                "state_sent_to_usps": state,
-                "zip_sent_to_usps": zip5,
-                "usps_status": status,
-                "address_note": note,
-            }
-        )
-        merged.update(cleaned)
-        results.append(merged)
-
-        progress.progress(i / total)
-
-    progress.empty()
-    df_all = pd.DataFrame(results)
-
-    # Optional: show a quick summary of USPS errors in the UI
-    if "usps_error" in df_all.columns:
-        errors = (
-            df_all["usps_error"]
-            .fillna("")
-            .loc[df_all["usps_error"] != ""]
-            .value_counts()
-            .head(5)
-        )
-        if not errors.empty:
-            st.warning("Sample USPS errors (top 5):")
-            st.write(errors)
-
-    return df_all
+    # Keep only the columns that actually exist in the DataFrame
+    existing_cols = [c for c in desired_cols if c in df.columns]
+    return df[existing_cols]
 
 
 # -------------------------------------------------------------------
@@ -302,25 +166,23 @@ def usps_clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 # -------------------------------------------------------------------
 
 def main():
-    st.set_page_config(page_title="CAMS → USPS Address Export", layout="wide")
-    st.title("CAMS Address Selector (LA County) with USPS-cleaned export")
+    st.set_page_config(page_title="CAMS Address Export", layout="wide")
+    st.title("CAMS Address Selector (LA County)")
 
     st.markdown(
         """
-        **Workflow (single step):**
+        **Workflow:**
 
         1. Pick a school from the dropdown in the left sidebar.  
         2. The map will zoom to that school and drop a marker.  
         3. Draw a polygon or rectangle around the area you care about.  
-        4. Click **Run CAMS + USPS**.  
+        4. Click **Run CAMS query**.  
 
         The app will:
 
         - Query LA County CAMS for all address points inside your shape.  
-        - Run USPS address cleaning on each result.  
-        - Mark each row as VERIFIED or UNVERIFIED.  
-        - Flag likely apartment buildings as "APARTMENT numbers".  
-        - Show you the table and a CSV for download.
+        - Mark likely apartment/condo addresses.  
+        - Return only: **FullAddress, NumPrefix, Number, StreetName, PostType, address_note**.  
         """
     )
 
@@ -403,11 +265,11 @@ def main():
     with col1:
         last = map_data.get("last_active_drawing")
         if last:
-            st.success("Polygon detected. Ready to run CAMS + USPS.")
+            st.success("Polygon detected. Ready to run CAMS query.")
         else:
             st.info("Draw a polygon or rectangle to enable the query.")
 
-        run_query = st.button("Run CAMS + USPS on drawn area")
+        run_query = st.button("Run CAMS query on drawn area")
 
     df_final = pd.DataFrame()
 
@@ -427,8 +289,7 @@ def main():
                     st.warning("No CAMS address points found in that area.")
                     df_final = df_cams
                 else:
-                    with st.spinner("Cleaning addresses with USPS..."):
-                        df_final = usps_clean_dataframe(df_cams)
+                    df_final = prepare_address_output(df_cams)
 
             except Exception as e:
                 st.error(f"Error while processing: {e}")
@@ -438,7 +299,7 @@ def main():
         if not df_final.empty:
             st.write(
                 f"Addresses returned: **{len(df_final)}** rows "
-                "(CAMS data + USPS fields + status/note)."
+                "(FullAddress + basic components + note)."
             )
             st.dataframe(df_final)
 
@@ -446,11 +307,11 @@ def main():
             st.download_button(
                 "Download address CSV",
                 data=csv_bytes,
-                file_name="cams_usps_addresses.csv",
+                file_name="cams_addresses_basic.csv",
                 mime="text/csv",
             )
         else:
-            st.write("No results yet. Draw an area and click **Run CAMS + USPS**.")
+            st.write("No results yet. Draw an area and click **Run CAMS query**.")
 
 
 if __name__ == "__main__":
