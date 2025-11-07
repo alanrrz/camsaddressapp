@@ -109,34 +109,22 @@ def query_cams_addresses(esri_polygon: dict) -> pd.DataFrame:
 
 def detect_apartment_note(row) -> str:
     """
-    Mark likely apartment / condo addresses.
-
-    Heuristics:
-      - If BldgTypePl or BldgType contains '1-4'
-      - Or if UnitName is not empty
-
-    Adjust this logic if CAMS uses different codes for multi-family.
-    """
-    btype = str(row.get("BldgTypePl", "") or row.get("BldgType", "")).upper()
-    unit = str(row.get("UnitName", "")).strip()
-
-    if "1-4" in btype or "APT" in btype or "APART" in btype or "CONDO" in btype:
-        return "APARTMENT / CONDO (check unit numbers)"
-    if unit:
-        return "UNIT PRESENT (check apartment/condo number)"
-    return ""
-
-
-def detect_apartment_note(row) -> str:
-    """
-    Mark addresses as likely condos/apartments if the building type
-    field contains a dash (e.g., '1-4', '5-9', etc.).
+    Flag possible multi-unit properties when:
+      - BldgTypePl or BldgType contains a dash (e.g., '1-4', '5-9'),
+      - or the street number includes a fraction (like '1/2', '3/4', etc.).
     """
     btype = str(row.get("BldgTypePl", "") or row.get("BldgType", "")).strip()
-    if "-" in btype:
-        return "CONDO/APARTMENT"
-    return ""
+    number = str(row.get("Number", "")).strip()
 
+    # Multi-family building type (range)
+    if "-" in btype:
+        return "MULTI-UNIT — PLEASE VERIFY"
+
+    # Fractional address number (e.g., 1748 1/2)
+    if "/" in number:
+        return "MULTI-UNIT — PLEASE VERIFY"
+
+    return ""
 
 def prepare_address_output(df: pd.DataFrame) -> pd.DataFrame:
     """
