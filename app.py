@@ -120,43 +120,72 @@ def detect_apartment_note(row) -> str:
     if "-" in btype:
         return "MULTI-UNIT — PLEASE VERIFY"
 
-    # Fractional address number (e.g., 1748 1/2)
+    # Fractional address number (e.g., 1748 1/2, 1818 3/4)
     if "/" in number:
         return "MULTI-UNIT — PLEASE VERIFY"
 
     return ""
 
+
+def build_mailing_address(row) -> str:
+    """
+    Build a simple mailing address from:
+      Number, StreetName, PostType, LegalComm, ZipCode
+
+    Example:
+      816 108Th St Los Angeles 90059
+    """
+    number = str(row.get("Number", "")).strip()
+    street = str(row.get("StreetName", "")).strip()
+    post_type = str(row.get("PostType", "")).strip()
+    city = str(row.get("LegalComm", "") or row.get("PostComm1", "")).strip()
+    zip_raw = str(row.get("ZipCode", "")).strip()
+    zip5 = zip_raw[:5] if zip_raw else ""
+
+    parts = [number, street, post_type, city, zip5]
+    mailing = " ".join(p for p in parts if p)
+    return mailing
+
+
 def prepare_address_output(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Reduce CAMS output to the requested columns and add apartment/condo note.
+    Reduce CAMS output to the requested columns and add:
+      - MailingAddress (Number + StreetName + PostType + LegalComm + ZipCode)
+      - address_note (multi-unit flag)
 
     Columns returned:
-      - FullAddress
+      - MailingAddress
       - NumPrefix
       - Number
       - StreetName
       - PostType
+      - LegalComm
+      - ZipCode
       - address_note
     """
     if df.empty:
         return df
 
     df = df.copy()
+
+    # Build mailing address and multi-unit note
+    df["MailingAddress"] = df.apply(build_mailing_address, axis=1)
     df["address_note"] = df.apply(detect_apartment_note, axis=1)
 
     desired_cols = [
-        "FullAddress",
+        "MailingAddress",
         "NumPrefix",
         "Number",
         "StreetName",
         "PostType",
+        "LegalComm",
+        "ZipCode",
         "address_note",
     ]
 
-    # Only include columns that exist in the dataset
+    # Keep only columns that actually exist
     existing_cols = [c for c in desired_cols if c in df.columns]
     return df[existing_cols]
-
 
 # -------------------------------------------------------------------
 # STREAMLIT APP
