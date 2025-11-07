@@ -118,11 +118,11 @@ def detect_apartment_note(row) -> str:
 
     # Multi-family building type (range)
     if "-" in btype:
-        return "MULTI-UNIT — PLEASE VERIFY"
+        return "MULTI-UNIT - PLEASE VERIFY"
 
     # Fractional address number (e.g., 1748 1/2, 1818 3/4)
     if "/" in number:
-        return "MULTI-UNIT — PLEASE VERIFY"
+        return "MULTI-UNIT - PLEASE VERIFY"
 
     return ""
 
@@ -176,29 +176,39 @@ def prepare_address_output(df: pd.DataFrame) -> pd.DataFrame:
     existing_cols = [c for c in desired_cols if c in df.columns]
     return df[existing_cols]
 
+
 # -------------------------------------------------------------------
 # STREAMLIT APP
 # -------------------------------------------------------------------
 
 def main():
-    st.set_page_config(page_title="CAMS Address Export", layout="wide")
-    st.title("CAMS Address Selector (LA County)")
+    st.set_page_config(
+        page_title="HOME - Household Outreach Mapping Engine",
+        layout="wide",
+    )
+
+    st.title("HOME - Household Outreach Mapping Engine")
+    st.caption("Draw an area around a school to download household addresses from LA County CAMS.")
 
     st.markdown(
         """
-        **Workflow:**
+        **How to use this tool**
 
-        1. Pick a school from the dropdown in the left sidebar.  
-        2. The map will zoom to that school and drop a marker.  
-        3. Draw a polygon or rectangle around the area you care about.  
-        4. Click **Run CAMS query**.  
+        1. On the left, choose a school.
+        2. On the map, use the toolbar in the top-left to draw a box or outline
+           (rectangle or polygon) around the area you want.
+        3. Click **Get addresses in this area**.
 
         The app will:
-
-        - Query LA County CAMS for all address points inside your shape.  
-        - Mark likely apartment/condo addresses.  
-        - Return only: **FullAddress, NumPrefix, Number, StreetName, PostType, address_note**.  
+        - Pull all CAMS address points inside your shape.
+        - Flag possible multi-unit (apartment/condo) addresses.
+        - Let you download a CSV of mailing addresses.
         """
+    )
+
+    st.info(
+        "On the map, look at the small toolbar in the **top-left**. "
+        "Click the square or shape icon to start drawing a rectangle or polygon."
     )
 
     # Load schools
@@ -217,9 +227,9 @@ def main():
         schools_df[SCHOOL_NAME_COL].dropna().astype(str).sort_values().unique()
     )
 
-    st.sidebar.header("School selection")
+    st.sidebar.header("Step 1 - Choose a school")
     selected_school = st.sidebar.selectbox(
-        "Select a school",
+        "School",
         school_names,
         index=0 if len(school_names) > 0 else None,
     )
@@ -229,9 +239,7 @@ def main():
     school_lon = float(school_row[LON_COL])
     school_short = str(school_row.get(SHORTNAME_COL, ""))
 
-    st.sidebar.write(f"**Full name (LABEL):** {selected_school}")
-    if school_short:
-        st.sidebar.write(f"**Short name:** {school_short}")
+    st.sidebar.write(f"**Selected school:** {selected_school}")
     st.sidebar.write(f"**Lat/Lon:** {school_lat:.6f}, {school_lon:.6f}")
 
     # Map centered on selected school
@@ -263,9 +271,9 @@ def main():
     )
     draw.add_to(m)
 
-    st.markdown("### Map")
+    st.markdown("### Step 2 - Draw your area on the map")
     st.write(
-        "Choose a school in the sidebar, then draw a polygon or rectangle around it."
+        "Use the toolbar in the top-left of the map to draw a rectangle or polygon around the area you want."
     )
 
     map_data = st_folium(
@@ -280,18 +288,18 @@ def main():
     with col1:
         last = map_data.get("last_active_drawing")
         if last:
-            st.success("Polygon detected. Ready to run CAMS query.")
+            st.success("Shape detected. Ready to get addresses.")
         else:
-            st.info("Draw a polygon or rectangle to enable the query.")
+            st.info("Draw a rectangle or polygon to enable the address lookup.")
 
-        run_query = st.button("Run CAMS query on drawn area")
+        run_query = st.button("Step 3 - Get addresses in this area")
 
     df_final = pd.DataFrame()
 
     if run_query:
         last = map_data.get("last_active_drawing")
         if not last or "geometry" not in last:
-            st.error("No polygon detected. Please draw a polygon or rectangle first.")
+            st.error("No shape detected. Please draw a rectangle or polygon first.")
         else:
             try:
                 geojson_geom = last["geometry"]
@@ -310,11 +318,11 @@ def main():
                 st.error(f"Error while processing: {e}")
 
     with col2:
-        st.markdown("### Results")
+        st.markdown("### Addresses in selected area")
         if not df_final.empty:
             st.write(
-                f"Addresses returned: **{len(df_final)}** rows "
-                "(FullAddress + basic components + note)."
+                f"Addresses returned: **{len(df_final)}** "
+                "(MailingAddress + components + note)."
             )
             st.dataframe(df_final)
 
@@ -326,7 +334,7 @@ def main():
                 mime="text/csv",
             )
         else:
-            st.write("No results yet. Draw an area and click **Run CAMS query**.")
+            st.write("No results yet. Draw an area and click **Get addresses in this area**.")
 
 
 if __name__ == "__main__":
