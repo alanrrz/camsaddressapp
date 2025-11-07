@@ -30,9 +30,16 @@ CAMS_URL = (
 )
 
 # USPS Web Tools
-USPS_USER_ID = st.secrets.get("USPS_USER_ID", "PUT_YOUR_USPS_USERID_HERE")
+# IMPORTANT: set USPS_USER_ID in Streamlit Secrets for this app:
+# Settings -> Secrets:
+# USPS_USER_ID = "YOUR_WEBTOOLS_USERID"
+USPS_USER_ID = st.secrets["USPS_USER_ID"]
 USPS_ENDPOINT = "https://secure.shippingapis.com/ShippingAPI.dll"
 
+
+# -------------------------------------------------------------------
+# DATA LOADING
+# -------------------------------------------------------------------
 
 @st.cache_data
 def load_schools() -> pd.DataFrame:
@@ -41,6 +48,10 @@ def load_schools() -> pd.DataFrame:
     df = df.dropna(subset=[LAT_COL, LON_COL])
     return df
 
+
+# -------------------------------------------------------------------
+# CAMS QUERY HELPERS
+# -------------------------------------------------------------------
 
 def build_esri_polygon_from_geojson(geojson_geom: dict) -> dict:
     """
@@ -101,42 +112,29 @@ def query_cams_addresses(esri_polygon: dict) -> pd.DataFrame:
 
 
 # -------------------------------------------------------------------
-# USPS ADDRESS CLEANING
+# USPS ADDRESS CLEANING HELPERS
 # -------------------------------------------------------------------
 
-def build_mailing_address_from_cams(row) -> tuple[str, str, str, str]:
+def build_mailing_address_from_cams(row):
     """
     Build mailing address components from a CAMS row.
 
-    You may need to adjust field names here to match the actual CAMS columns
-    you see in the DataFrame.
+    This uses the actual CAMS fields visible in your screenshot:
+      Number, PreDirAbbr, StreetName, PostTypeAbbr, UnitName,
+      PostComm (city), ZipCode.
     """
-    # Try multiple possible CAMS field names, fall back gracefully
-    house = str(
-        row.get("STREETNUM", "")
-        or row.get("ADDRNUM", "")
-        or row.get("HOUSENUMBER", "")
-        or ""
-    ).strip()
-
-    predir = str(row.get("PREDIR", "") or row.get("PRE_DIR", "") or "").strip()
-    name = str(row.get("STREETNAME", "") or row.get("STREET_NAME", "") or "").strip()
-    st_type = str(
-        row.get("STREETTYPE", "") or row.get("STREET_TYPE", "") or ""
-    ).strip()
-    unit = str(
-        row.get("UNIT", "")
-        or row.get("UNITNUM", "")
-        or row.get("UNIT_NUMBER", "")
-        or ""
-    ).strip()
+    house = str(row.get("Number", "")).strip()
+    predir = str(row.get("PreDirAbbr", "") or row.get("PreDir", "")).strip()
+    name = str(row.get("StreetName", "")).strip()
+    st_type = str(row.get("PostTypeAbbr", "") or row.get("PostType", "")).strip()
+    unit = str(row.get("UnitName", "")).strip()
 
     street_parts = [house, predir, name, st_type, unit]
     street = " ".join(p for p in street_parts if p)
 
-    city = str(row.get("CITY", "") or row.get("COMMUNITY", "") or "").strip()
-    state = str(row.get("STATE", "") or "CA").strip()
-    zip_raw = str(row.get("ZIPCODE", "") or row.get("ZIP", "") or "").strip()
+    city = str(row.get("PostComm", "") or row.get("LegalComm", "")).strip()
+    state = "CA"  # CAMS is LA County, so California
+    zip_raw = str(row.get("ZipCode", "")).strip()
     zip5 = zip_raw[:5] if zip_raw else ""
 
     return street, city, state, zip5
@@ -147,10 +145,6 @@ def usps_verify_one(street: str, city: str, state: str, zip5: str) -> dict:
     Call USPS Verify API for a single address.
     Returns standardized fields, or {} on error.
     """
-    if not USPS_USER_ID or USPS_USER_ID.startswith("PUT_"):
-        # Not configured; skip cleaning
-        return {}
-
     xml = f"""
     <AddressValidateRequest USERID="{USPS_USER_ID}">
       <Revision>1</Revision>
@@ -178,6 +172,7 @@ def usps_verify_one(street: str, city: str, state: str, zip5: str) -> dict:
     except ET.ParseError:
         return {}
 
+    # USPS returns <Error> when it cannot validate
     err = root.find(".//Error")
     if err is not None:
         return {}
@@ -190,7 +185,7 @@ def usps_verify_one(street: str, city: str, state: str, zip5: str) -> dict:
         el = addr.find(tag)
         return el.text.strip() if el is not None and el.text is not None else ""
 
-    dpv_conf = gettext("DPVConfirmation")
+    dpv_conf = gettext("DPVConfirmation")  # deliverability flag if your account has DPV
     dpv_cmra = gettext("DPVCMRA")
     dpv_vac = gettext("DPVVacant")
 
@@ -209,13 +204,11 @@ def usps_verify_one(street: str, city: str, state: str, zip5: str) -> dict:
 def usps_clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     For each CAMS result, call USPS Verify and append standardized columns.
-    If USPS_USER_ID is not set, returns df unchanged with a warning.
+
+    Only rows where USPS returns a non-empty usps_street are kept in
+    the final DataFrame. Everything else is dropped as 'not verified'.
     """
     if df.empty:
-        return df
-
-    if not USPS_USER_ID or USPS_USER_ID.startswith("PUT_"):
-        st.warning("USPS_USER_ID not configured. Returning raw CAMS data.")
         return df
 
     results = []
@@ -235,7 +228,15 @@ def usps_clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         progress.progress(i / total)
 
     progress.empty()
-    return pd.DataFrame(results)
+    df_all = pd.DataFrame(results)
+
+    # Keep only verified rows: USPS returned a standardized street
+    if "usps_street" in df_all.columns:
+        df_verified = df_all[df_all["usps_street"].notna() & (df_all["usps_street"] != "")]
+    else:
+        df_verified = pd.DataFrame()
+
+    return df_verified
 
 
 # -------------------------------------------------------------------
@@ -248,15 +249,19 @@ def main():
 
     st.markdown(
         """
-        Workflow (single step):
-        1. Pick a school from the dropdown (left sidebar).
-        2. The map will zoom to that school and drop a marker.
-        3. Draw a polygon or rectangle around the area you care about.
-        4. Click **Run CAMS + USPS**.
-           The app will:
-           • Query LA County CAMS for all address points inside your shape, and  
-           • Immediately run USPS address cleaning,  
-           • Then give you a CSV with standardized mailing fields.
+        **Workflow (single step):**
+
+        1. Pick a school from the dropdown in the left sidebar.  
+        2. The map will zoom to that school and drop a marker.  
+        3. Draw a polygon or rectangle around the area you care about.  
+        4. Click **Run CAMS + USPS**.  
+
+        The app will:
+
+        - Query LA County CAMS for all address points inside your shape.  
+        - Run USPS address cleaning on each result.  
+        - KEEP ONLY addresses that USPS returns as standardized.  
+        - Show you the table and a USPS-ready CSV.
         """
     )
 
@@ -293,7 +298,7 @@ def main():
         st.sidebar.write(f"**Short name:** {school_short}")
     st.sidebar.write(f"**Lat/Lon:** {school_lat:.6f}, {school_lon:.6f}")
 
-    # Map
+    # Map centered on selected school
     m = folium.Map(location=[school_lat, school_lon], zoom_start=16)
 
     popup_text = selected_school
@@ -306,6 +311,7 @@ def main():
         tooltip=popup_text,
     ).add_to(m)
 
+    # Drawing controls (polygon + rectangle)
     draw = Draw(
         export=False,
         position="topleft",
@@ -362,8 +368,14 @@ def main():
                     st.warning("No CAMS address points found in that area.")
                     df_final = df_cams
                 else:
-                    with st.spinner("Cleaning addresses with USPS..."):
+                    with st.spinner("Cleaning addresses with USPS and keeping only verified ones..."):
                         df_final = usps_clean_dataframe(df_cams)
+
+                    if df_final.empty:
+                        st.warning(
+                            "CAMS returned addresses, but USPS did not validate any of them. "
+                            "You may need to inspect a few rows and check the field mapping."
+                        )
 
             except Exception as e:
                 st.error(f"Error while processing: {e}")
@@ -372,16 +384,16 @@ def main():
         st.markdown("### Results")
         if not df_final.empty:
             st.write(
-                f"Found **{len(df_final)}** CAMS address points. "
-                "USPS fields added where available."
+                f"USPS-verified addresses: **{len(df_final)}** rows "
+                "(original CAMS data + usps_* columns)."
             )
             st.dataframe(df_final)
 
             csv_bytes = df_final.to_csv(index=False).encode("utf-8")
             st.download_button(
-                "Download USPS-ready CSV",
+                "Download USPS-verified CSV",
                 data=csv_bytes,
-                file_name="cams_usps_cleaned_addresses.csv",
+                file_name="cams_usps_verified_addresses.csv",
                 mime="text/csv",
             )
         else:
