@@ -243,7 +243,27 @@ def main():
     st.sidebar.write(f"**Lat/Lon:** {school_lat:.6f}, {school_lon:.6f}")
 
     # Map centered on selected school
+   # ---------------------------------------------------------
+    # MAP SETUP WITH SATELLITE TOGGLE
+    # ---------------------------------------------------------
+    
+    # 1. Create base map (Defaults to OpenStreetMap "Regular" view)
     m = folium.Map(location=[school_lat, school_lon], zoom_start=16)
+
+    # 2. Add Satellite tiles as an additional base layer
+    #    We use Esri WorldImagery for the satellite view
+    folium.TileLayer(
+        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        attr='Esri',
+        name='Satellite',
+        overlay=False,  # This makes it a base map (radio button) rather than overlay
+        control=True
+    ).add_to(m)
+
+    # 3. Add the layer control (the toggle button top-right)
+    folium.LayerControl().add_to(m)
+
+    # --------------------------------------------------------- m = folium.Map(location=[school_lat, school_lon], zoom_start=16)
 
     popup_text = selected_school
     if school_short:
