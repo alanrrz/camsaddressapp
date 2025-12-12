@@ -150,9 +150,8 @@ def prepare_address_output(df: pd.DataFrame) -> pd.DataFrame:
     Prepare final dataset for export:
       - Creates MailingAddress from basic fields
       - Flags multi-unit properties
-      - Keeps selected columns:
-        MailingAddress, FullAddress_EnerGov, NumPrefix, Number,
-        StreetName, PostType, LegalComm, ZipCode, address_note
+      - Keeps selected columns
+      - SORTS by StreetName then Number (numerically)
     """
     if df.empty:
         return df
@@ -160,6 +159,16 @@ def prepare_address_output(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["MailingAddress"] = df.apply(build_mailing_address, axis=1)
     df["address_note"] = df.apply(detect_apartment_note, axis=1)
+
+    # ---------------------------------------------------------
+    # SORTING LOGIC ADDED HERE
+    # ---------------------------------------------------------
+    # 1. Create a temporary numeric column so "2" comes before "10"
+    df["_sort_num"] = pd.to_numeric(df["Number"], errors="coerce")
+    
+    # 2. Sort by StreetName (A-Z), then by the numeric Number
+    df = df.sort_values(by=["StreetName", "_sort_num"], ascending=[True, True])
+    # ---------------------------------------------------------
 
     desired_cols = [
         "MailingAddress",
@@ -174,8 +183,9 @@ def prepare_address_output(df: pd.DataFrame) -> pd.DataFrame:
     ]
 
     existing_cols = [c for c in desired_cols if c in df.columns]
+    
+    # Return only the desired columns (dropping the temp sort column)
     return df[existing_cols]
-
 
 # -------------------------------------------------------------------
 # STREAMLIT APP
