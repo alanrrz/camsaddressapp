@@ -242,25 +242,33 @@ def main():
     st.sidebar.write(f"**Selected school:** {selected_school}")
     st.sidebar.write(f"**Lat/Lon:** {school_lat:.6f}, {school_lon:.6f}")
 
-    # Map centered on selected school
-   # ---------------------------------------------------------
-    # MAP SETUP WITH SATELLITE TOGGLE
+# ---------------------------------------------------------
+    # MAP SETUP: REGULAR (DEFAULT) + SATELLITE TOGGLE
     # ---------------------------------------------------------
     
-    # 1. Create base map (Defaults to OpenStreetMap "Regular" view)
-    m = folium.Map(location=[school_lat, school_lon], zoom_start=16)
+    # 1. Create the map container, but turn off the default tiles (tiles=None)
+    #    so we can control exactly which layer is added first.
+    m = folium.Map(location=[school_lat, school_lon], zoom_start=16, tiles=None)
 
-    # 2. Add Satellite tiles as an additional base layer
-    #    We use Esri WorldImagery for the satellite view
+    # 2. Add "Regular" view (OpenStreetMap) FIRST.
+    #    Because this is added first, it will be the default view on load.
     folium.TileLayer(
-        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-        attr='Esri',
-        name='Satellite',
-        overlay=False,  # This makes it a base map (radio button) rather than overlay
+        "OpenStreetMap",
+        name="Regular View",  # Name that appears in the toggle
         control=True
     ).add_to(m)
 
-    # 3. Add the layer control (the toggle button top-right)
+    # 3. Add "Satellite" view SECOND.
+    #    It will be available in the menu but hidden by default.
+    folium.TileLayer(
+        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        attr='Esri',
+        name='Satellite View',
+        overlay=False,
+        control=True
+    ).add_to(m)
+
+    # 4. Add the toggle control (top-right layer icon)
     folium.LayerControl().add_to(m)
 
     # --------------------------------------------------------- m = folium.Map(location=[school_lat, school_lon], zoom_start=16)
