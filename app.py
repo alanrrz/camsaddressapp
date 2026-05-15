@@ -24,7 +24,7 @@ LON_COL = "LON"
 SHORTNAME_COL = "SHORTNAME"
 
 CAMS_URL = (
-    "https://arcgis.gis.lacounty.gov/arcgis/rest/services/DRP/"
+    "https://rpgis.isd.lacounty.gov/arcgis/rest/services/"
     "GISNET_Public/MapServer/402/query"
 )
 
@@ -104,7 +104,7 @@ def query_cams_addresses(esri_polygon: dict) -> pd.DataFrame:
     """
     all_rows = []
     offset = 0
-    page_size = 1000
+    page_size = 2000  # matches layer MaxRecordCount
 
     while True:
         params = {
