@@ -165,14 +165,36 @@ def parse_unit_count(btype: str) -> int:
     return 1
 
 
+def has_unit_info(row) -> bool:
+    """True if CAMS has a populated unit identifier for this row."""
+    for field in ("UnitName", "UnitType", "FlrName", "FlrType"):
+        val = str(row.get(field, "") or "").strip()
+        if val and val.lower() not in ("nan", "none", "0"):
+            return True
+    return False
+
+
+def is_multi_proptype(row) -> bool:
+    """Check PropType field for multi-unit keywords."""
+    pt = str(row.get("PropType", "") or "").strip().upper()
+    keywords = ("APT", "MULTI", "CONDO", "DUPLEX", "TRIPLEX", "FOURPLEX",
+                "APARTMENT", "RESIDENTIAL INCOME", "DWELLING UNITS")
+    return any(kw in pt for kw in keywords)
+
+
 def detect_apartment_note(row) -> str:
-    # BldgType is the string field like "1-4", "5-9"; BldgTypePl is an integer code
-    btype = str(row.get("BldgType", "")).strip()
-    number = str(row.get("Number", "")).strip()
+    """Flag multi-unit using ANY of: BldgType range, fractional number,
+    populated UnitName/UnitType/FlrName, or PropType keywords."""
+    btype = str(row.get("BldgType", "") or "").strip()
+    number = str(row.get("Number", "") or "").strip()
 
     if "-" in btype:
         return "MULTI-UNIT - PLEASE VERIFY"
     if "/" in number:
+        return "MULTI-UNIT - PLEASE VERIFY"
+    if has_unit_info(row):
+        return "MULTI-UNIT - PLEASE VERIFY"
+    if is_multi_proptype(row):
         return "MULTI-UNIT - PLEASE VERIFY"
     return ""
 
@@ -209,12 +231,22 @@ def prepare_address_output(df: pd.DataFrame, expand_multiunit: bool = False) -> 
 
     df = df.copy()
     df["Street"] = df.apply(build_street_field, axis=1)
+
+    # Build a parcel key (Number + StreetName + ZipCode) and count points per parcel.
+    # CAMS often emits multiple points at one parcel for multi-unit buildings,
+    # even when BldgType/UnitName are empty. This is the most reliable signal.
+    parcel_key = (
+        df.get("Number", "").astype(str).str.strip() + "|" +
+        df.get("StreetName", "").astype(str).str.strip() + "|" +
+        df.get("ZipCode", "").astype(str).str[:5]
+    )
+    df["_parcel_points"] = parcel_key.map(parcel_key.value_counts())
+
     df["address_note"] = df.apply(detect_apartment_note, axis=1)
+    # Override: if multiple CAMS points at the same parcel, it's multi-unit
+    df.loc[df["_parcel_points"] > 1, "address_note"] = "MULTI-UNIT - PLEASE VERIFY"
 
-    # State (CAMS doesn't always include it; LA County is CA)
     df["State"] = "CA"
-
-    # Clean ZIP to 5 digits
     df["ZipCode"] = df.get("ZipCode", "").astype(str).str[:5]
 
     # City fallback chain
@@ -227,28 +259,41 @@ def prepare_address_output(df: pd.DataFrame, expand_multiunit: bool = False) -> 
     df = df.sort_values(by=["StreetName", "_sort_num"], ascending=[True, True])
 
     if expand_multiunit:
-        # Use BldgType (string field like "1-4", "5-9"). Treat missing as single-unit.
+        # Priority for unit count:
+        # 1. If CAMS already returned multiple points at this parcel, that count is truth.
+        #    (Don't expand further, dedup will collapse, then we'd lose units.)
+        # 2. Otherwise use BldgType range (low end, conservative).
+        # 3. Otherwise 1.
         if "BldgType" in df.columns:
             btype_series = df["BldgType"].fillna("").astype(str)
         else:
             btype_series = pd.Series([""] * len(df), index=df.index)
 
-        # parse_unit_count returns 1 for blanks/unknowns. Force int dtype.
-        df["_unit_count"] = btype_series.apply(parse_unit_count).astype(int)
-        # Defensive floor at 1 so index.repeat never sees 0 or NaN
+        bldg_count = btype_series.apply(parse_unit_count).astype(int)
+        parcel_count = df["_parcel_points"].fillna(1).astype(int)
+
+        # Use whichever is larger: real point count vs BldgType estimate
+        df["_unit_count"] = parcel_count.combine(bldg_count, max)
         df.loc[df["_unit_count"] < 1, "_unit_count"] = 1
 
-        # Replicate rows according to estimated unit count
+        # If parcel already has multiple points, DON'T expand further,
+        # CAMS already returned the rows.
+        df.loc[df["_parcel_points"] > 1, "_unit_count"] = 1
+
         repeat_counts = df["_unit_count"].to_numpy(dtype="int64")
         df = df.loc[df.index.repeat(repeat_counts)].reset_index(drop=True)
 
-        # Add unit label, only for buildings with >1 estimated units
+        # Unit labels: prefer real CAMS UnitName, otherwise synthesize a counter
         df["UnitLabel"] = ""
-        multi_mask = df["_unit_count"] > 1
-        if multi_mask.any():
-            # Counter within each duplicated group, keyed by original Street + ZipCode
-            df.loc[multi_mask, "UnitLabel"] = (
-                df[multi_mask]
+        if "UnitName" in df.columns:
+            real_units = df["UnitName"].fillna("").astype(str).str.strip()
+            df.loc[real_units != "", "UnitLabel"] = real_units
+
+        # For synthesized expansions, number sequentially within parcel
+        needs_label = (df["UnitLabel"] == "") & (df["_unit_count"] > 1)
+        if needs_label.any():
+            df.loc[needs_label, "UnitLabel"] = (
+                df[needs_label]
                 .groupby(["Street", "ZipCode"])
                 .cumcount()
                 .add(1)
@@ -442,11 +487,19 @@ def main():
                 df_final = prepare_address_output(df_cams, expand_multiunit=expand_multiunit)
 
                 if dedupe and not df_final.empty:
+                    # Include UnitLabel in the dedup key when present, so we don't
+                    # collapse 12 apartments in one building down to a single row.
+                    dedup_cols = ["Street", "ZipCode"]
+                    if "UnitLabel" in df_final.columns:
+                        dedup_cols.append("UnitLabel")
                     before = len(df_final)
-                    df_final = df_final.drop_duplicates(subset=["Street", "ZipCode"]).reset_index(drop=True)
+                    df_final = df_final.drop_duplicates(subset=dedup_cols).reset_index(drop=True)
                     removed = before - len(df_final)
                     if removed > 0:
                         st.caption(f"Removed {removed} duplicate address rows.")
+
+                # Save raw CAMS response for debugging
+                st.session_state["_raw_cams"] = df_cams
 
         except Exception as e:
             st.error(f"Error while processing: {e}")
@@ -487,6 +540,35 @@ def main():
                 file_name=f"mailing_list_{school_short or 'school'}_full.csv",
                 mime="text/csv",
             )
+
+            # Debug view: see what CAMS actually returned
+            raw = st.session_state.get("_raw_cams")
+            if raw is not None and not raw.empty:
+                with st.expander("Debug: raw CAMS response (what fields are populated?)"):
+                    st.write(f"Raw row count from CAMS: {len(raw)}")
+                    # Show which multi-unit signal fields are populated
+                    signal_cols = [c for c in ["BldgType", "BldgTypePl", "UnitName",
+                                                "UnitType", "FlrName", "FlrType", "PropType"]
+                                   if c in raw.columns]
+                    if signal_cols:
+                        st.write("**Multi-unit signal field population:**")
+                        signal_summary = pd.DataFrame({
+                            "Field": signal_cols,
+                            "Non-empty rows": [
+                                raw[c].fillna("").astype(str).str.strip().ne("").sum()
+                                for c in signal_cols
+                            ],
+                            "Sample values": [
+                                ", ".join(
+                                    raw[c].fillna("").astype(str).str.strip()
+                                    .replace("", pd.NA).dropna().head(5).tolist()
+                                ) or "(all empty)"
+                                for c in signal_cols
+                            ],
+                        })
+                        st.dataframe(signal_summary, use_container_width=True)
+                    st.write("**Full raw CAMS data:**")
+                    st.dataframe(raw, use_container_width=True)
         else:
             st.write("No results yet. Set your area and click **Get addresses in this area**.")
 
