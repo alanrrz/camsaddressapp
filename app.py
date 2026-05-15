@@ -166,7 +166,8 @@ def parse_unit_count(btype: str) -> int:
 
 
 def detect_apartment_note(row) -> str:
-    btype = str(row.get("BldgTypePl", "") or row.get("BldgType", "")).strip()
+    # BldgType is the string field like "1-4", "5-9"; BldgTypePl is an integer code
+    btype = str(row.get("BldgType", "")).strip()
     number = str(row.get("Number", "")).strip()
 
     if "-" in btype:
@@ -226,18 +227,33 @@ def prepare_address_output(df: pd.DataFrame, expand_multiunit: bool = False) -> 
     df = df.sort_values(by=["StreetName", "_sort_num"], ascending=[True, True])
 
     if expand_multiunit:
-        # Estimate units from BldgTypePl / BldgType and duplicate rows
-        btype_series = df.get("BldgTypePl", "")
-        if btype_series is None or (hasattr(btype_series, "empty") and btype_series.empty):
-            btype_series = df.get("BldgType", "")
-        df["_unit_count"] = btype_series.fillna("").astype(str).apply(parse_unit_count)
+        # Use BldgType (string field like "1-4", "5-9"). Treat missing as single-unit.
+        if "BldgType" in df.columns:
+            btype_series = df["BldgType"].fillna("").astype(str)
+        else:
+            btype_series = pd.Series([""] * len(df), index=df.index)
 
-        # Replicate rows
-        df = df.loc[df.index.repeat(df["_unit_count"])].reset_index(drop=True)
+        # parse_unit_count returns 1 for blanks/unknowns. Force int dtype.
+        df["_unit_count"] = btype_series.apply(parse_unit_count).astype(int)
+        # Defensive floor at 1 so index.repeat never sees 0 or NaN
+        df.loc[df["_unit_count"] < 1, "_unit_count"] = 1
 
-        # Add unit label (just a counter within each repeated group)
-        df["UnitLabel"] = df.groupby(level=0, group_keys=False).cumcount() + 1
-        df.loc[df["_unit_count"] <= 1, "UnitLabel"] = ""
+        # Replicate rows according to estimated unit count
+        repeat_counts = df["_unit_count"].to_numpy(dtype="int64")
+        df = df.loc[df.index.repeat(repeat_counts)].reset_index(drop=True)
+
+        # Add unit label, only for buildings with >1 estimated units
+        df["UnitLabel"] = ""
+        multi_mask = df["_unit_count"] > 1
+        if multi_mask.any():
+            # Counter within each duplicated group, keyed by original Street + ZipCode
+            df.loc[multi_mask, "UnitLabel"] = (
+                df[multi_mask]
+                .groupby(["Street", "ZipCode"])
+                .cumcount()
+                .add(1)
+                .astype(str)
+            )
 
         export_cols = ["Street", "UnitLabel", "LegalComm", "State", "ZipCode", "address_note"]
     else:
